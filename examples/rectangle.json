@@ -1,0 +1,8 @@
+{
+  "name": "Rectangle",
+  "units": "metres",
+  "boundary": [[0, 0], [20, 0], [20, 12], [0, 12]],
+  "holes": [],
+  "start": [1, 1],
+  "swath": 2.0
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Concave U-shaped boundary",
+  "units": "metres",
+  "boundary": [[0, 0], [20, 0], [20, 16], [14, 16], [14, 6], [6, 6], [6, 16], [0, 16]],
+  "holes": [],
+  "start": [1, 1],
+  "swath": 2.0
+}

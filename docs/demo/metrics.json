@@ -1,0 +1,40 @@
+{
+  "algorithm": "gtsp",
+  "objective": 229.3320328538233,
+  "total_length": 229.33203285382328,
+  "service_length": 213.53333333333333,
+  "transit_length": 15.798699520489954,
+  "absolute_turn_angle_rad": 61.0483400365809,
+  "vertex_turn_count": 38,
+  "lane_reversal_count": 15,
+  "coverage_ratio": 1.0,
+  "uncovered_area": 0.0,
+  "overlap_excess_ratio": 0.2839292414600554,
+  "collision_free_within_tolerance": true,
+  "num_cells": 4,
+  "num_candidate_states": 32,
+  "selected_cell_order": [
+    0,
+    2,
+    3,
+    1
+  ],
+  "selected_first_turns": [
+    "right",
+    "left",
+    "right",
+    "right"
+  ],
+  "preprocessing_seconds": 0.024840084999937062,
+  "solver_seconds": 0.13977962700005264,
+  "planning_seconds": 0.1646197119999897,
+  "swath": 2.0,
+  "spacing": 2.0,
+  "start": [
+    1,
+    1
+  ],
+  "closed": true,
+  "boundary_pass": false,
+  "seed": 0
+}
