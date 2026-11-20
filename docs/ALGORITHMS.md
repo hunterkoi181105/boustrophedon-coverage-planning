@@ -20,14 +20,20 @@ The repository implements this idea through **event slabs**, rather than reprodu
 the paper's floor/ceiling pointer data structures.
 
 1. Rotate P so the chosen slice direction is vertical.
-2. Sort and group vertex X coordinates.
+2. Sort distinct vertex X coordinates, deduplicating only exact equal values.
 3. Intersect P with each consecutive event slab.
 4. Find which components in consecutive slabs share a positive-length gate.
 5. Continue a cell only across a mutual one-to-one correspondence.
 6. At splits, merges, births, or deaths, end/open the affected cells and add
    adjacency edges.
 7. Union all fragments belonging to a cell and rotate back.
-8. Check area conservation and non-overlap.
+8. Require nonempty, valid monotone cells; check area conservation and non-overlap
+   relative to the input area, including when the input is very small.
+
+Nearby event coordinates, narrow strips, positive-area fragments, and short
+positive-length gates are retained. A geometric tolerance must not erase a
+connectivity change. Failed overlays, collapsed fragments, or invalid output
+produce a numerical-degeneracy error instead of an incomplete decomposition.
 
 IMPORTANT: compare the local component correspondence, not just the total number
 of slice components. A split and a merge can happen at the same X coordinate,
@@ -40,9 +46,16 @@ servicing them. Every cell must still have exactly one selected service state.
 ## 3. Sweep generation and initial turn
 
 A candidate state is a directed, complete service polyline for a cell. For each
-requested angle, sample the open intervals between projected boundary events to
-check monotonicity. A nonmonotone orientation is skipped. Supporting it would
-require another decomposition, not a straight jump over disconnected intervals.
+requested angle, check that both boundary chains advance from the minimum to the
+maximum projection without backtracking. This avoids needing a representable
+midpoint between adjacent floating-point event coordinates. A nonmonotone
+orientation is skipped. Supporting it would require another decomposition,
+not a straight jump over disconnected intervals.
+
+Cells are checked strictly in the decomposition's local sweep frame. Checking a
+rotated cell allows eight ULPs (units in the last place) of its coordinate scale
+for projection roundoff; axis-aligned checks have no such allowance. This
+validation allowance never groups events or removes fragments during construction.
 
 Place N = ceil(cell_width / d) centered lanes, with a uniform separation of
 cell_width / N. Generate increasing/decreasing lane order and positive/negative

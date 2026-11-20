@@ -51,15 +51,12 @@ def vertices(poly: Polygon) -> list[Point2D]:
 
 
 def event_coordinates(poly: Polygon) -> list[float]:
-    """Group numerically coincident event positions, including vertical edges."""
-    eps = tolerance(poly)
-    result: list[float] = []
-    for x in sorted(p[0] for p in vertices(poly)):
-        if not result or x - result[-1] > eps:
-            result.append(x)
-    # Include the exact maximum even if it was grouped with a nearby event.
-    result[-1] = poly.bounds[2]
-    return result
+    """Return distinct vertex projections without merging nearby events.
+
+    Even a very narrow interval can contain a connectivity change. Numerical
+    allowances belong in result validation, never in the event topology.
+    """
+    return sorted({x for x, _ in vertices(poly)})
 
 
 def load_map(path: str | Path) -> tuple[Polygon, dict]:
@@ -108,20 +105,37 @@ def turn_angle(points, before: float | None = None, after: float | None = None) 
 
 
 def is_monotone(poly: Polygon, angle_deg: float) -> bool:
-    """Check one connected vertical section in every open event slab.
+    """Check the two boundary chains from minimum to maximum projection.
 
-    For polygonal boundaries topology is constant between consecutive vertex
-    projections. Event-line degeneracies use the neighboring open slabs.
+    A valid, hole-free polygon is monotone iff both chains advance without
+    backtracking. This avoids sampling between adjacent floats, which may have
+    no representable midpoint. Axis-aligned checks are exact; other rotations
+    allow a few coordinate ULPs for projection roundoff only. Construction
+    events are never snapped or grouped using this allowance.
     """
-    local = to_local(poly, angle_deg)
-    if local.interiors:
+    if (
+        poly.is_empty or not poly.is_valid or not math.isfinite(poly.area)
+        or poly.area <= 0 or poly.interiors or not math.isfinite(angle_deg)
+    ):
         return False
-    xs = event_coordinates(local)
-    _, ymin, _, ymax = local.bounds
-    pad = max(ymax - ymin, 1)
-    for a, b in zip(xs, xs[1:]):
-        cut = LineString([((a + b) / 2, ymin - pad), ((a + b) / 2, ymax + pad)])
-        lines = [s for s in line_parts(local.intersection(cut)) if s.length > tolerance(local)]
-        if len(lines) != 1:
-            return False
+    local = to_local(poly, angle_deg)
+    if local.is_empty or not local.is_valid or not math.isfinite(local.area) or local.area <= 0:
+        return False
+    xs = [x for x, _ in list(local.exterior.coords)[:-1]]
+    start = min(range(len(xs)), key=xs.__getitem__)
+    end = max(range(len(xs)), key=xs.__getitem__)
+    if xs[start] == xs[end]:
+        return False
+    projection_error = 0.0
+    if angle_deg % 90.0 != 0.0:
+        scale = max(abs(value) for point in poly.exterior.coords for value in point)
+        projection_error = 8 * math.ulp(scale)
+    for step in (1, -1):
+        i = start
+        furthest = xs[i]
+        while i != end:
+            i = (i + step) % len(xs)
+            if furthest - xs[i] > projection_error:
+                return False
+            furthest = max(furthest, xs[i])
     return True
