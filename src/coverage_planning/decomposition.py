@@ -6,21 +6,41 @@ noncritical events. No uniform raster discretization is used.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 
+from shapely.errors import GEOSException
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
 
-from .geometry import event_coordinates, polygon_parts, to_local, to_world, tolerance
+from .geometry import event_coordinates, is_monotone, polygon_parts, to_local, to_world
 from .models import Cell, Decomposition
 
 
 def decompose(region: Polygon, angle_deg: float = 90.0) -> Decomposition:
-    if region.is_empty or not region.is_valid or region.area <= 0:
+    if (
+        not isinstance(region, Polygon) or region.is_empty or not region.is_valid
+        or not math.isfinite(region.area) or region.area <= 0
+    ):
         raise ValueError("Expected one valid, connected, positive-area Polygon.")
+    if not math.isfinite(angle_deg):
+        raise ValueError("Decomposition angle must be finite.")
+    try:
+        return _decompose(region, angle_deg)
+    except GEOSException as exc:
+        raise ValueError(
+            "Numerically degenerate decomposition: geometry operation failed; "
+            "rescale or clean the input map."
+        ) from exc
+
+
+def _decompose(region: Polygon, angle_deg: float) -> Decomposition:
     local = to_local(region, angle_deg)
-    eps = tolerance(local)
+    if local.is_empty or not local.is_valid or not math.isfinite(local.area) or local.area <= 0:
+        raise ValueError("Numerically degenerate decomposition: rotation lost valid geometry.")
     xs = event_coordinates(local)
+    if len(xs) < 2:
+        raise ValueError("Numerically degenerate decomposition: no positive-width event strips.")
     _, ymin, _, ymax = local.bounds
     pad = max(ymax - ymin, 1)
     pieces: dict[int, list[Polygon]] = defaultdict(list)
@@ -31,16 +51,17 @@ def decompose(region: Polygon, angle_deg: float = 90.0) -> Decomposition:
     next_id = 0
 
     for left, right in zip(xs, xs[1:]):
-        if right - left <= eps:
-            continue
+        if not left < right:
+            raise ValueError("Numerically degenerate decomposition: unordered event coordinates.")
         clipped = local.intersection(box(left, ymin - pad, right, ymax + pad))
-        current = sorted(
-            [p for p in polygon_parts(clipped) if p.area > eps * eps],
-            key=lambda p: p.centroid.y,
-        )
+        current = sorted(polygon_parts(clipped), key=lambda p: p.centroid.y)
+        if not current or any(
+            not p.is_valid or not math.isfinite(p.area) or p.area <= 0 for p in current
+        ):
+            raise ValueError("Numerically degenerate decomposition: event strip lost positive area.")
         # Positive-length shared gates, not just touching at a point.
         links = [
-            [j for j, q in enumerate(current) if p.intersection(q).length > eps]
+            [j for j, q in enumerate(current) if p.intersection(q).length > 0]
             for p in previous
         ]
         incoming = [
@@ -80,12 +101,23 @@ def decompose(region: Polygon, angle_deg: float = 90.0) -> Decomposition:
     cells = []
     for cell_id, parts in sorted(pieces.items()):
         merged = unary_union(parts)
-        if merged.geom_type != "Polygon" or merged.interiors:
-            raise ValueError("Numerically degenerate cell; rescale or clean the input map.")
-        cells.append(Cell(cell_id, to_world(merged, angle_deg)))
+        # Check topology in the construction frame before round-trip rotation.
+        if merged.geom_type != "Polygon" or not is_monotone(merged, 90.0):
+            raise ValueError("Numerically degenerate decomposition: cell is invalid or nonmonotone.")
+        world = to_world(merged, angle_deg)
+        if not is_monotone(world, angle_deg):
+            raise ValueError("Numerically degenerate decomposition: rotated cell is nonmonotone.")
+        cells.append(Cell(cell_id, world))
+    if not cells:
+        raise ValueError("Numerically degenerate decomposition: positive-area input produced no cells.")
     union = unary_union([c.polygon for c in cells])
     error = union.symmetric_difference(region).area
-    overlap = sum(c.polygon.area for c in cells) - union.area
-    if error > max(region.area, 1) * 1e-7 or overlap > max(region.area, 1) * 1e-7:
-        raise ValueError("Decomposition failed area/overlap validation.")
+    overlap = math.fsum(c.polygon.area for c in cells) - union.area
+    # A fixed absolute floor can accept losing an entire small input polygon.
+    # Ratios retain a relative allowance without underflowing area * tolerance.
+    if (
+        not math.isfinite(error) or not math.isfinite(overlap)
+        or error / region.area > 1e-7 or overlap / region.area > 1e-7
+    ):
+        raise ValueError("Numerically degenerate decomposition: area/overlap validation failed.")
     return Decomposition(cells, dict(adjacency), events, angle_deg)
