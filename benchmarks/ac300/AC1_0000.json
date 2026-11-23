@@ -1,0 +1,60 @@
+{
+  "name": "AC300 original AC1_0000 (UNC Charlotte redistributed ETH polygon data)",
+  "units": "metres",
+  "boundary": [
+    [
+      0,
+      0
+    ],
+    [
+      100,
+      0
+    ],
+    [
+      100,
+      100
+    ],
+    [
+      0,
+      100
+    ]
+  ],
+  "holes": [
+    [
+      [
+        36.0336,
+        85.6915
+      ],
+      [
+        30.2807,
+        78.1911
+      ],
+      [
+        26.8736,
+        76.6978
+      ],
+      [
+        23.3402,
+        79.0796
+      ],
+      [
+        27.8299,
+        84.9782
+      ],
+      [
+        25.3895,
+        86.66
+      ],
+      [
+        27.4206,
+        90.6947
+      ]
+    ]
+  ],
+  "start": [
+    0,
+    0
+  ],
+  "swath": 3.0,
+  "source": "UNCCharlotte-CS-Robotics/AreaCoverage-dataset/AC300/AC1_0000"
+}
