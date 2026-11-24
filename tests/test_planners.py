@@ -7,7 +7,7 @@ from coverage_planning.costs import CostModel
 from coverage_planning.geometry import path_length, turn_angle
 from coverage_planning.models import Cell
 from coverage_planning.pipeline import Config, plan
-from coverage_planning.planners import solve_exact, solve_gtsp, solve_tsp
+from coverage_planning.planners import solve_aco, solve_exact, solve_gtsp, solve_tsp
 from coverage_planning.planners.gtsp import optimize_states
 from coverage_planning.sweeps import generate_states
 from coverage_planning.transitions import VisibilityRouter
@@ -69,7 +69,7 @@ def test_reproducible_seed(tiny_model):
 
 
 @pytest.mark.parametrize("closed", [True, False])
-@pytest.mark.parametrize("algorithm", ["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact"])
+@pytest.mark.parametrize("algorithm", ["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact", "aco"])
 def test_end_to_end(closed, algorithm):
     run = plan(ROOT / "examples/one_obstacle.json", Config(algorithm=algorithm, closed=closed))
     assert run.metrics["collision_free_within_tolerance"]
@@ -84,6 +84,26 @@ def test_end_to_end(closed, algorithm):
 def test_exact_guard(tiny_model):
     with pytest.raises(ValueError, match="limited"):
         solve_exact(tiny_model, max_cells=2)
+
+
+def test_aco_seed_bounds_and_reproducibility(tiny_model):
+    order = [s.cell_id for s in solve_tsp(tiny_model).states]
+    initial = solve_aco(tiny_model, iterations=0)
+    assert initial.objective == pytest.approx(optimize_states(order, tiny_model)[1])
+    result = solve_aco(tiny_model, seed=17)
+    assert result == solve_aco(tiny_model, seed=17)
+    assert sorted(s.cell_id for s in result.states) == sorted(order)
+    assert tiny_model.evaluate(result.states) == pytest.approx(result.objective)
+    assert solve_exact(tiny_model).objective <= result.objective + 1e-8
+    assert result.accepted_objectives[0] == initial.objective
+    assert result.accepted_objectives[-1] == result.objective
+    assert all(a > b for a, b in zip(result.accepted_objectives, result.accepted_objectives[1:]))
+
+
+@pytest.mark.parametrize("kwargs", [{"ants": 0}, {"iterations": -1}, {"ants": 1.5}])
+def test_aco_invalid_budget(tiny_model, kwargs):
+    with pytest.raises(ValueError, match="integer"):
+        solve_aco(tiny_model, **kwargs)
 
 
 def test_start_heading_additive():

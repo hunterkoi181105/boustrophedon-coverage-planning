@@ -13,7 +13,7 @@ from pathlib import Path
 from .geometry import load_map
 from .pipeline import Config, plan, save_run
 
-ALGORITHMS = ("tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact")
+ALGORITHMS = ("tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact", "aco")
 METRIC_COLUMNS = (
     "objective", "total_length", "service_length", "transit_length",
     "coverage_ratio", "uncovered_area", "overlap_excess_ratio",
@@ -25,7 +25,7 @@ COLUMNS = (
     "map", "source_file", "algorithm", "seed", "status", "error", "run_directory",
     "holes", "vertices", "free_area", "swath", "spacing", "decomposition_angle_deg",
     "candidate_angles_deg", "turn_weight", "robot_speed_m_per_s", "restarts", "closed", "boundary_pass",
-    *METRIC_COLUMNS, "coverage_percent", "overlap_excess_percent",
+    "aco_ants", "aco_iterations", *METRIC_COLUMNS, "coverage_percent", "overlap_excess_percent",
     "estimated_mission_seconds",
     "selected_cell_order", "selected_sweep_angles_deg", "selected_first_turns",
 )
@@ -99,6 +99,8 @@ def main(argv=None) -> int:
     parser.add_argument("--start", nargs=2, type=float, default=None)
     parser.add_argument("--open", action="store_true")
     parser.add_argument("--boundary-pass", action="store_true")
+    parser.add_argument("--aco-ants", type=int, default=Config.aco_ants)
+    parser.add_argument("--aco-iterations", type=int, default=Config.aco_iterations)
     parser.add_argument("--out", default="results/benchmark.csv")
     parser.add_argument("--runs-dir", help="Where per-run plan.json and metrics.json are written")
     parser.add_argument("--no-save-runs", action="store_true", help="Only write CSV files")
@@ -141,10 +143,10 @@ def main(argv=None) -> int:
                         "map": name, "source_file": str(path), "algorithm": algorithm,
                         "seed": seed, "status": "ok", "error": "", "run_directory": "",
                         "decomposition_angle_deg": args.decomposition_angle,
-                        "candidate_angles_deg": json.dumps(args.angles if args.angles is not None
-                                                           else [args.decomposition_angle, 0.0]),
                         "turn_weight": args.turn_weight, "robot_speed_m_per_s": args.robot_speed,
                         "restarts": args.restarts,
+                        "aco_ants": args.aco_ants if algorithm == "aco" else None,
+                        "aco_iterations": args.aco_iterations if algorithm == "aco" else None,
                         "closed": not args.open, "boundary_pass": args.boundary_pass,
                     }
                     try:
@@ -161,10 +163,12 @@ def main(argv=None) -> int:
                             decomposition_angle=args.decomposition_angle,
                             angles=tuple(args.angles) if args.angles is not None else None,
                             swath=args.swath, spacing=args.spacing, turn_weight=args.turn_weight,
+                            aco_ants=args.aco_ants, aco_iterations=args.aco_iterations,
                             restarts=args.restarts, closed=not args.open,
                             start=tuple(args.start) if args.start is not None else None,
                         )
                         # Fresh planner, costs, and router per trial: no cross-trial cache.
+                        row["candidate_angles_deg"] = json.dumps(config.sweep_angles(data))
                         run = plan(path, config)
                         metrics = run.metrics
                         row.update({k: metrics.get(k, "") for k in METRIC_COLUMNS})

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from shapely.geometry import LineString, mapping
@@ -12,7 +12,7 @@ from .costs import CostModel
 from .decomposition import decompose
 from .geometry import load_map
 from .metrics import evaluate
-from .planners import solve_exact, solve_gtsp, solve_tsp
+from .planners import solve_aco, solve_exact, solve_gtsp, solve_tsp
 from .sweeps import generate_states
 from .transitions import VisibilityRouter
 
@@ -32,6 +32,20 @@ class Config:
     turn_weight: float = 0.0
     seed: int = 0
     restarts: int = 2
+    aco_ants: int = 12
+    aco_iterations: int = 20
+
+    def sweep_angles(self, data: dict) -> tuple[float, ...]:
+        if self.angles is not None:
+            return self.angles
+        if "angles" not in data:
+            return (self.decomposition_angle, 0.0)
+        angles = data["angles"]
+        if not isinstance(angles, list) or not angles or not all(
+            type(a) in (int, float) and math.isfinite(a) for a in angles
+        ):
+            raise ValueError("Map angles must be a nonempty array of finite numbers in degrees")
+        return tuple(angles)
 
 
 @dataclass
@@ -57,7 +71,7 @@ def plan(map_path: str | Path, config: Config | None = None) -> Run:
         raise ValueError("swath must be finite and positive")
     if not math.isfinite(spacing) or spacing <= 0 or spacing > swath:
         raise ValueError("spacing must be positive and no greater than swath")
-    angles = config.angles if config.angles is not None else (config.decomposition_angle, 0.0)
+    angles = config.sweep_angles(data)
     decomposition = decompose(region, config.decomposition_angle)
     clusters = []
     offset = 0
@@ -82,6 +96,9 @@ def plan(map_path: str | Path, config: Config | None = None) -> Run:
         solution = solve_gtsp(model, seed=config.seed, restarts=config.restarts)
     elif config.algorithm == "gtsp-exact":
         solution = solve_exact(model)
+    elif config.algorithm == "aco":
+        solution = solve_aco(model, seed=config.seed, ants=config.aco_ants,
+                             iterations=config.aco_iterations)
     else:
         raise ValueError(f"Unknown algorithm: {config.algorithm}")
     solved = time.perf_counter()
@@ -99,7 +116,7 @@ def plan(map_path: str | Path, config: Config | None = None) -> Run:
     })
     if not metrics["collision_free_within_tolerance"]:
         raise ValueError("Final path failed collision validation.")
-    return Run(region, decomposition, model, solution, metrics, config, data)
+    return Run(region, decomposition, model, solution, metrics, replace(config, angles=angles), data)
 
 
 def save_run(run: Run, output: str | Path, make_plot: bool = True) -> None:

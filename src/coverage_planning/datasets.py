@@ -1,15 +1,17 @@
 """Prepare reproducible synthetic and AC300 polygon-with-holes benchmarks.
 
-Use `python -m coverage_planning.datasets --help` for the two subcommands.
-No network access is required; AC300 is read from a separately downloaded repository.
+Use `python -m coverage_planning.datasets --help` for local and GitHub imports.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import re
+import subprocess
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from shapely.geometry import Point, Polygon, box
 
@@ -80,15 +82,23 @@ def _read_rings(path: Path) -> list[list[list[float]]]:
     return rings
 
 
-def ac300(source: Path, out: Path, per_hole: int, hole_counts: list[int], swath: float) -> int:
+def ac300(source: Path, out: Path, per_hole: int | None, hole_counts: list[int] | None,
+          swath: float) -> int:
     """Import matching UNC Charlotte AC300 maps, using one consistent depot."""
-    if per_hole < 1 or swath <= 0:
+    if (per_hole is not None and per_hole < 1) or not math.isfinite(swath) or swath <= 0:
         raise ValueError("per-hole and swath must be positive")
     root = source / "AC300" if (source / "AC300").is_dir() else source
+    groups: dict[int, list[Path]] = {}
+    for directory in sorted(root.iterdir()):
+        match = re.fullmatch(r"AC(\d+)_\d+", directory.name)
+        if match and directory.is_dir():
+            groups.setdefault(int(match[1]), []).append(directory)
+    if not groups:
+        raise ValueError(f"No AC300 map directories found in {root}")
     total = 0
-    for holes in hole_counts:
-        candidates = sorted(root.glob(f"AC{holes}_*"))
-        if len(candidates) < per_hole:
+    for holes in sorted(groups) if hole_counts is None else hole_counts:
+        candidates = groups.get(holes, [])
+        if not candidates or (per_hole is not None and len(candidates) < per_hole):
             raise ValueError(f"Need {per_hole} AC{holes} environments, found {len(candidates)}")
         for directory in candidates[:per_hole]:
             outer_rings = _read_rings(directory / "outer_polygon")
@@ -111,10 +121,22 @@ def ac300(source: Path, out: Path, per_hole: int, hole_counts: list[int], swath:
                 "boundary": outer_rings[0], "holes": inner_rings,
                 "start": list(depot), "swath": swath,
                 "dataset": "UNCCharlotte-CS-Robotics/AreaCoverage-dataset AC300",
+                "source": f"UNCCharlotte-CS-Robotics/AreaCoverage-dataset/AC300/{directory.name}",
             }
             _write_map(out / f"{directory.name}.json", data)
             total += 1
     return total
+
+
+def fetch_ac300(out: Path, swath: float) -> int:
+    """Check out the AC300 subtree from GitHub, convert all maps, and clean up."""
+    url = "https://github.com/UNCCharlotte-CS-Robotics/AreaCoverage-dataset.git"
+    with TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "dataset"
+        subprocess.run(["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
+                        "--branch", "main", url, str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "sparse-checkout", "set", "AC300"], check=True)
+        return ac300(repo, out, None, None, swath)
 
 
 def main(argv=None) -> int:
@@ -131,14 +153,23 @@ def main(argv=None) -> int:
     imp.add_argument("--per-hole", type=int, default=3)
     imp.add_argument("--holes", nargs="+", type=int, default=[1, 3, 5, 10, 15])
     imp.add_argument("--swath", type=float, default=3.0)
+    fetch = commands.add_parser("fetch-ac300", help="Download and convert the full AC300 dataset")
+    fetch.add_argument("--out", default="benchmarks/ac300_full")
+    fetch.add_argument("--swath", type=float, default=3.0)
+    fetch.add_argument("--source", type=Path, help="Use an existing checkout or AC300 folder")
     args = parser.parse_args(argv)
     try:
         if args.mode == "synthetic":
             total = synthetic(Path(args.out), args.count, args.seed, args.swath)
+        elif args.mode == "fetch-ac300":
+            if args.source is None:
+                total = fetch_ac300(Path(args.out), args.swath)
+            else:
+                total = ac300(args.source, Path(args.out), None, None, args.swath)
         else:
             total = ac300(Path(args.source), Path(args.out), args.per_hole,
                           args.holes, args.swath)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         parser.exit(2, f"Dataset preparation failed: {exc}\n")
     print(f"Prepared {total} maps in {args.out}")
     return 0

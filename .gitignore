@@ -18,3 +18,12 @@ results/
 Thumbs.db
 .idea/
 .vscode/
+
+#Latex
+manuscript/
+
+#Graphify
+graphify-out/
+
+#Dataset
+benchmarks/ac300_full

@@ -9,7 +9,7 @@ from .pipeline import Config, plan, save_run
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="BCD coverage planning: TSP and sweep-state GTSP")
     parser.add_argument("map", help="JSON file with boundary, holes, and optional start/swath")
-    parser.add_argument("--algorithm", choices=["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact"], default="gtsp")
+    parser.add_argument("--algorithm", choices=["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact", "aco"], default="gtsp")
     parser.add_argument("--decomposition-angle", type=float, default=90.0, help="Slice orientation from +X, degrees")
     parser.add_argument("--angles", nargs="+", type=float, help="Candidate lane orientations; invalid angles per cell are skipped")
     parser.add_argument("--swath", type=float, help="Sensor/tool coverage width, NOT robot diameter")
@@ -22,6 +22,8 @@ def main(argv=None) -> int:
     parser.add_argument("--turn-weight", type=float, default=0.0, help="Objective units per radian of heading change")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--restarts", type=int, default=2)
+    parser.add_argument("--aco-ants", type=int, default=Config.aco_ants)
+    parser.add_argument("--aco-iterations", type=int, default=Config.aco_iterations)
     parser.add_argument("--out", default="results/demo")
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args(argv)
@@ -33,6 +35,7 @@ def main(argv=None) -> int:
         start=None if args.start is None else tuple(args.start),
         start_heading=args.start_heading, turn_weight=args.turn_weight,
         seed=args.seed, restarts=args.restarts,
+        aco_ants=args.aco_ants, aco_iterations=args.aco_iterations,
     )
     try:
         run = plan(args.map, config)

@@ -25,12 +25,14 @@ from matplotlib.patches import FancyBboxPatch
 import numpy as np
 
 COLORS = {
+    "aco": "#C45132",
     "gtsp": "#02A696",
     "tsp-2opt": "#4E76E8",
     "tsp-greedy": "#F1AD4C",
     "gtsp-exact": "#8A63D2",
 }
 LABELS = {
+    "aco": "ACO (ant colony)",
     "gtsp": "GTSP (direction-aware)",
     "tsp-2opt": "TSP + 2-opt",
     "tsp-greedy": "Greedy TSP",
@@ -81,8 +83,8 @@ def summarize(rows):
     maps = sorted(set(map_name for map_name, _ in grouped), key=lambda m: (
         min((numerical(r, "holes") for r in ok if r["map"] == m), default=0), m))
     algorithms = sorted(set(algo for _, algo in grouped), key=lambda a: (
-        ["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact"].index(a)
-        if a in ["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact"] else 99, a))
+        ["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact", "aco"].index(a)
+        if a in ["tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact", "aco"] else 99, a))
     return stats, maps, algorithms, ok
 
 
@@ -104,6 +106,29 @@ def improvement(stats, maps, baseline="tsp-greedy", optimized="gtsp"):
     return data
 
 
+def comparison_summary(stats, maps, algorithms, ok):
+    comparisons = {}
+    cards = []
+    for algo in ("gtsp", "aco"):
+        if algo not in algorithms:
+            continue
+        gains = improvement(stats, maps, optimized=algo)
+        comparisons[algo] = gains
+        runtimes = [value(stats, m, algo, "planning_seconds") for m in maps]
+        runtimes = [t for t in runtimes if math.isfinite(t)]
+        label = algo.upper()
+        wins = sum(gain > 1e-8 for gain in gains.values())
+        cards.extend([
+            (f"{label} median saving vs greedy", format_percent(median(gains.values()), 2) if gains else "-"),
+            (f"{label} maps shorter than greedy", f"{wins} / {len(gains)}" if gains else "-"),
+            (f"{label} median planning time", f"{median(runtimes):.3f}s" if runtimes else "-"),
+        ])
+    coverage = [numerical(row, "coverage_percent") for row in ok]
+    cards.append(("Minimum observed coverage", format_percent(min(
+        (c for c in coverage if math.isfinite(c)), default=float("nan")))))
+    return comparisons, cards
+
+
 def style_axis(ax):
     ax.set_facecolor("white")
     for s in ax.spines.values():
@@ -123,35 +148,19 @@ def figure_overview(source, out, rows, stats, maps, algorithms, ok):
                           bottom=0.075, hspace=0.42, wspace=0.23,
                           height_ratios=[1.18, 1, 0.75])
     fig.text(0.055, 0.954, "BENCHMARK / COVERAGE PLANNING", fontsize=12, color=COLORS["gtsp"], weight="bold")
-    fig.text(0.055, 0.913, "BCD + GTSP  |  Performance overview", fontsize=25, color=NAVY, weight="bold")
+    fig.text(0.055, 0.913, "Coverage planners  |  Performance overview", fontsize=25, color=NAVY, weight="bold")
     failures = len(rows) - len(ok)
     seeds = len(set(r.get("seed", "") for r in rows))
     fig.text(0.055, 0.874, f"{len(maps)} polygon maps  ·  {len(algorithms)} algorithms  ·  {seeds} seed(s)  ·  {len(ok)}/{len(rows)} successful runs", fontsize=12, color=MUTED)
-    gains = improvement(stats, maps)
-    median_gain = median(gains.values()) if gains else float("nan")
-    wins = sum(v > 1e-8 for v in gains.values())
-    cov_values = [numerical(r, "coverage_percent") for r in ok]
-    cov_values = [v for v in cov_values if math.isfinite(v)]
-    cov_min = min(cov_values) if cov_values else float("nan")
-    gtsp_times = [value(stats, m, "gtsp", "planning_seconds") for m in maps]
-    gtsp_times = [v for v in gtsp_times if math.isfinite(v)]
-    median_gtsp_sec = median(gtsp_times) if gtsp_times else float("nan")
-    cards = [
-        ("MEDIAN DISTANCE SAVED", format_percent(median_gain, 2), "GTSP vs greedy, paired maps"),
-        ("MAPS IMPROVED", f"{wins} / {len(gains)}" if gains else "—", "GTSP route shorter than greedy"),
-        ("MINIMUM COVERAGE", format_percent(cov_min, 1), "Across successful benchmark runs"),
-        ("MEDIAN GTSP RUNTIME", f"{median_gtsp_sec:.3f}s" if gtsp_times else "—", "Preprocessing + solver"),
-    ]
-    left = 0.055
-    width = 0.212
-    for i, (label, number, description) in enumerate(cards):
-        x = left + i * 0.232
-        rect = FancyBboxPatch((x, 0.752), width, 0.095, boxstyle="round,pad=0.007,rounding_size=0.008",
-                              transform=fig.transFigure, facecolor="white", edgecolor="#DFE7F0", linewidth=0.85)
+    comparisons, cards = comparison_summary(stats, maps, algorithms, ok)
+    for i, (label, number) in enumerate(cards):
+        x = 0.055 + (i % 4) * 0.232
+        y = 0.795 - (i // 4) * 0.077
+        rect = FancyBboxPatch((x, y), 0.212, 0.057, boxstyle="round,pad=0.007,rounding_size=0.008",
+                              transform=fig.transFigure, facecolor="white", edgecolor="#DFE7F0")
         fig.add_artist(rect)
-        fig.text(x+0.012, 0.823, label, fontsize=9.2, color=MUTED, weight="bold")
-        fig.text(x+0.012, 0.782, number, fontsize=22, color=NAVY, weight="bold")
-        fig.text(x+0.012, 0.759, description, fontsize=8.3, color=MUTED)
+        fig.text(x+0.012, y+0.037, label, fontsize=10, color=MUTED)
+        fig.text(x+0.012, y+0.005, number, fontsize=18, color=NAVY, weight="bold")
 
     ax = fig.add_subplot(gs[0, 0]); style_axis(ax)
     positions = np.arange(len(maps))
@@ -168,24 +177,22 @@ def figure_overview(source, out, rows, stats, maps, algorithms, ok):
     ax.set_ylim(bottom=0)
 
     ax = fig.add_subplot(gs[0, 1]); style_axis(ax)
-    if gains:
-        ranked = sorted(gains, key=lambda m: gains[m])
-        ys = np.arange(len(ranked))
-        colors = [COLORS["gtsp"] if gains[m] > 0 else "#99A7B7" if gains[m] == 0 else "#E27F73" for m in ranked]
-        ax.barh(ys, [gains[m] for m in ranked], height=0.65, color=colors)
-        ax.set_yticks(ys, [m.replace("synthetic_", "S") for m in ranked])
-        ax.axvline(0, color="#A2B0BE", linewidth=1.2)
-        for y, m in zip(ys, ranked):
-            x = gains[m]
-            ax.text(x + (0.23 if x >= 0 else -0.2), y, f"{x:+.1f}%", fontsize=9,
-                    va="center", ha="left" if x >= 0 else "right", color=NAVY)
-        ax.set_xlim(left=min(-1.2, min(gains.values())-0.5), right=max(3, max(gains.values())+2.2))
-        ax.set_xlabel("Distance reduction vs Greedy TSP (%)", fontsize=10, color=MUTED)
-        ax.grid(axis="x", color=GRID)
-        ax.grid(axis="y", visible=False)
+    paired_maps = [m for m in maps if any(m in gains for gains in comparisons.values())]
+    if paired_maps:
+        ys = np.arange(len(paired_maps))
+        height = 0.8 / len(comparisons)
+        for i, (algo, gains) in enumerate(comparisons.items()):
+            offsets = ys + height * (i - (len(comparisons) - 1) / 2)
+            ax.barh(offsets, [gains.get(m, np.nan) for m in paired_maps], height=height,
+                    color=COLORS[algo], label=LABELS[algo])
+        ax.set_yticks(ys, [m.replace("synthetic_", "S") for m in paired_maps])
+        ax.axvline(0, color=MUTED, linewidth=1)
+        ax.set_xlabel("Distance reduction vs Greedy TSP (%)")
+        ax.legend(frameon=False, fontsize=8)
     else:
-        ax.text(0.5,0.5,"No paired GTSP / Greedy results",ha="center",va="center",transform=ax.transAxes)
-    ax.set_title("02  GTSP improvement by sample", loc="left", pad=15)
+        ax.text(0.5, 0.5, "No paired results with Greedy TSP", ha="center", va="center",
+                transform=ax.transAxes)
+    ax.set_title("02  Distance saved vs Greedy TSP", loc="left", pad=15)
 
     ax = fig.add_subplot(gs[1, 0]); style_axis(ax)
     for algo in algorithms:
@@ -304,13 +311,17 @@ def html_dashboard(source,out,rows,stats,maps,algorithms,ok):
     fig.update_layout(barmode="group",yaxis_title="Total route length (m)")
     distance=panel(fig)
 
-    gains=improvement(stats,maps)
-    fig=go.Figure(go.Bar(x=[gains[m] for m in maps if m in gains],
-                         y=[m for m in maps if m in gains], orientation="h",
-                         marker_color=[COLORS["gtsp"] if gains[m]>=0 else "#E27F73" for m in maps if m in gains],
-                         text=[f"{gains[m]:+.1f}%" for m in maps if m in gains],textposition="outside",
-                         hovertemplate="<b>%{y}</b><br>Distance saved: %{x:.2f}%<extra></extra>"))
-    fig.update_layout(xaxis_title="GTSP distance reduction relative to greedy (%)",yaxis=dict(autorange="reversed"))
+    comparisons, kpi = comparison_summary(stats, maps, algorithms, ok)
+    fig = go.Figure()
+    for algo, gains in comparisons.items():
+        fig.add_trace(go.Bar(x=list(gains.values()), y=list(gains), orientation="h",
+                             name=LABELS[algo], marker_color=COLORS[algo],
+                             hovertemplate="<b>%{y}</b><br>Distance saved: %{x:.2f}%<extra>%{fullData.name}</extra>"))
+    if not any(comparisons.values()):
+        fig.add_annotation(text="No paired results with Greedy TSP", showarrow=False,
+                           xref="paper", yref="paper", x=0.5, y=0.5)
+    fig.update_layout(barmode="group", xaxis_title="Distance reduction vs Greedy TSP (%)",
+                      yaxis=dict(autorange="reversed"))
     gain_panel=panel(fig)
 
     fig=go.Figure()
@@ -335,15 +346,6 @@ def html_dashboard(source,out,rows,stats,maps,algorithms,ok):
               value(stats,m,a,"vertex_turn_count"),value(stats,m,a,"overlap_excess_percent"),
               value(stats,m,a,"planning_seconds")) for m in maps for a in algorithms if (m,a) in stats]
     table="".join(f"<tr><td>{html.escape(m)}</td><td><span class='dot' style='background:{COLORS.get(a, '#7F91A4')}'></span>{html.escape(LABELS.get(a,a))}</td><td>{length:,.1f}</td><td>{cover:.1f}%</td><td>{turns:.0f}</td><td>{overlap:.2f}%</td><td>{rt:.4f}</td></tr>" for m,a,length,cover,turns,overlap,rt in results)
-    imp=median(gains.values()) if gains else float("nan")
-    wins=sum(x>1e-8 for x in gains.values())
-    covervals=[numerical(r,"coverage_percent") for r in ok];covervals=[x for x in covervals if math.isfinite(x)]
-    gtsp_times=[value(stats,m,"gtsp","planning_seconds") for m in maps]
-    gtsp_times=[v for v in gtsp_times if math.isfinite(v)]
-    kpi=[("Median GTSP distance saved",format_percent(imp,2)),
-         ("Maps with GTSP improvement",f"{wins} / {len(gains)}" if gains else "—"),
-         ("Min observed coverage",format_percent(min(covervals),1) if covervals else "—"),
-         ("Median GTSP runtime",f"{median(gtsp_times):.3f}s" if gtsp_times else "—")]
     cards="".join(f"<section class='kpi'><span>{html.escape(k)}</span><strong>{html.escape(v)}</strong></section>" for k,v in kpi)
     page=f"""<!doctype html><html lang='en'><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/>
 <title>Coverage planning benchmark dashboard</title><style>
@@ -359,7 +361,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}}th,td{{text-align:rig
 tr:hover td{{background:#F4F9FB}}.dot{{display:inline-block;height:9px;width:9px;border-radius:50%;margin-right:9px}}
 .note{{background:#E8F3F2;border-radius:11px;padding:15px 20px;color:#3B6C69;font-size:13px;margin:23px 0 0}}
 footer{{margin-top:20px;color:var(--muted);font-size:12px}}@media(max-width:1000px){{.kpis{{grid-template-columns:repeat(2,1fr)}}.layout{{grid-template-columns:1fr}}.wide{{grid-column:auto}}}}@media(max-width:520px){{.container{{padding:24px 14px}}.kpis{{grid-template-columns:1fr 1fr;gap:9px}}.kpi{{padding:14px}}.kpi strong{{font-size:19px}}}}
-</style></head><body><div class='container'><div class='eyebrow'>BCD / GTSP RESEARCH</div><h1>Coverage-planning benchmark</h1>
+</style></head><body><div class='container'><div class='eyebrow'>COVERAGE PLANNING</div><h1>Coverage-planning benchmark</h1>
 <p class='lead'>{len(maps)} maps · {len(algorithms)} planners · {len(ok)}/{len(rows)} successful runs · Input: {html.escape(source.name)} · Hover charts for per-sample metrics</p>
 <div class='kpis'>{cards}</div><div class='layout'>
 <section class='panel'><h2>01 — Path length by sample</h2>{distance}</section>

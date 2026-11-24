@@ -16,6 +16,7 @@ before interpreting a path as a physically executable robot or UAV trajectory.
 | Sweep patterns | Four start/order permutations per valid angle; initial left/right turn metadata |
 | TSP baseline | One fixed sweep state per cell, nearest-neighbor, directed-safe 2-opt |
 | GTSP heuristic | One state per cell, exact state-selection DP for a fixed order, 2-opt order search, seeded restarts |
+| Ant colony heuristic | Seeded sampling of cell orders using directed pheromone and obstacle-aware costs, with exact sweep selection for each sampled order |
 | Tiny-instance oracle | Subset DP for the discretized GTSP, limited to 8 cells |
 | Transitions | Obstacle-aware Euclidean shortest paths on a visibility graph |
 | Evaluation | Coverage, path length, transit length, lane reversals, angular turning, overlap, runtime |
