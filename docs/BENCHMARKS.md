@@ -12,6 +12,19 @@ Generate 10 fixed-seed synthetic maps. The generator creates rectangles with
 python -m coverage_planning.datasets synthetic --out benchmarks/synthetic --count 10 --seed 2026 --swath 3
 ```
 
+To convert the full AC300 collection from GitHub, run this from the project
+directory with Git and the project dependencies installed:
+
+```powershell
+python -m coverage_planning.datasets fetch-ac300
+```
+
+This writes one planner input per map to `benchmarks/ac300_full/<map-id>.json`.
+The boundary comes from `outer_polygon`. Each blank-line-separated ring in
+`holes` becomes one obstacle. The importer checks the hole count and polygon
+validity. The default swath is 3 metres. Use `--swath` to change it or
+`--source PATH` to convert a previously downloaded collection offline.
+
 To select 15 ETH-derived AC300 maps (3 each with 1, 3, 5, 10 and 15 holes), first
 obtain UNC Charlotte's AreaCoverage-dataset repository separately. Then run:
 
