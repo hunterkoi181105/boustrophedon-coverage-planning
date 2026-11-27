@@ -90,33 +90,51 @@ def test_axis_aligned_one_ulp_backtrack_is_nonmonotone():
     assert_partition(region, result)
 
 
-def test_empty_decomposition_of_positive_area_is_rejected(monkeypatch):
+@pytest.fixture(
+    params=[decomposition.decompose, decomposition.decompose_slabs], ids=["sweep", "slabs"],
+)
+def decompose(request):
+    return request.param
+
+
+def test_empty_decomposition_of_positive_area_is_rejected(monkeypatch, decompose):
     region = box(0, 0, 1e-4, 1e-4)
-    monkeypatch.setattr(decomposition, "polygon_parts", lambda _geometry: [])
-    with pytest.raises(ValueError, match="(?i)(numerical|degenera|empty|coverage|area)"):
-        decomposition.decompose(region, 90)
+    if decompose is decomposition.decompose:
+        monkeypatch.setattr(decomposition, "merge", lambda *_args, **_kwargs: iter(()))
+    else:
+        monkeypatch.setattr(decomposition, "polygon_parts", lambda _geometry: [])
+    with pytest.raises(ValueError, match="no cells|lost positive area"):
+        decompose(region, 90)
 
 
-def test_partial_loss_of_small_region_is_rejected(monkeypatch):
+def test_partial_loss_of_small_region_is_rejected(monkeypatch, decompose):
     region = box(0, 0, 1e-4, 1e-4)
     partial = box(0, 0, 5e-5, 1e-4)
-    # Simulate an overlay losing half a region, below the former absolute floor.
-    monkeypatch.setattr(decomposition, "polygon_parts", lambda _geometry: [partial])
-    with pytest.raises(ValueError, match="(?i)(numerical|degenera|coverage|area)"):
-        decomposition.decompose(region, 90)
+    # Simulate losing half a region, below the former absolute floor.
+    if decompose is decomposition.decompose:
+        monkeypatch.setattr(decomposition._OpenCell, "close_at", lambda *_args: partial)
+    else:
+        monkeypatch.setattr(decomposition, "polygon_parts", lambda _geometry: [partial])
+    with pytest.raises(ValueError, match="area/overlap validation failed"):
+        decompose(region, 90)
 
 
-def test_nonmonotone_output_is_rejected(monkeypatch, close_event_c_shape):
-    # Simulate a missed split. Area conservation alone still holds in this case.
-    monkeypatch.setattr(decomposition, "event_coordinates", lambda _polygon: [0.0, 10.0])
-    with pytest.raises(ValueError, match="(?i)(numerical|degenera|monotone)"):
-        decomposition.decompose(close_event_c_shape, 90)
+def test_nonmonotone_output_is_rejected(monkeypatch, close_event_c_shape, decompose):
+    # Simulate a cell spanning the unsplit region.
+    if decompose is decomposition.decompose:
+        monkeypatch.setattr(decomposition._OpenCell, "close_at", lambda *_args: close_event_c_shape)
+    else:
+        monkeypatch.setattr(decomposition, "event_coordinates", lambda _polygon: [0.0, 10.0])
+    with pytest.raises(ValueError, match="nonmonotone"):
+        decompose(close_event_c_shape, 90)
 
 
-def test_overlay_failure_reports_numerical_degeneracy(monkeypatch):
-    def failed_intersection(*_args, **_kwargs):
+def test_overlay_failure_reports_numerical_degeneracy(monkeypatch, decompose):
+    def failed_overlay(*_args, **_kwargs):
         raise GEOSException("forced overlay failure")
 
-    monkeypatch.setattr(Polygon, "intersection", failed_intersection)
-    with pytest.raises(ValueError, match="(?i)(numerical|degenera)"):
-        decomposition.decompose(box(0, 0, 2, 1), 90)
+    operation = "symmetric_difference" if decompose is decomposition.decompose else "intersection"
+    monkeypatch.setattr(Polygon, operation, failed_overlay)
+    with pytest.raises(ValueError, match="Numerically degenerate") as error:
+        decompose(box(0, 0, 2, 1), 90)
+    assert isinstance(error.value.__cause__, GEOSException)

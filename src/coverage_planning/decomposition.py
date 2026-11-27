@@ -2,17 +2,15 @@
 from __future__ import annotations
 
 import math
-import math
 from collections import defaultdict
 from dataclasses import dataclass
 from heapq import merge
 
 from shapely.errors import GEOSException
-from shapely.errors import GEOSException
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
 
-from .geometry import event_coordinates, polygon_parts, to_local, to_world, tolerance
+from .geometry import event_coordinates, is_monotone, polygon_parts, to_local, to_world
 from .models import Cell, Decomposition, Point2D
 
 
@@ -28,7 +26,10 @@ def decompose(region: Polygon, angle_deg: float = 90.0) -> Decomposition:
     try:
         return _sweep(region, angle_deg)
     except GEOSException as exc:
-        raise ValueError("Decomposition geometry failed; rescale or clean the map.") from exc
+        raise ValueError(
+            "Numerically degenerate decomposition: geometry operation failed; "
+            "rescale or clean the input map."
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -172,10 +173,7 @@ def _sweep(region: Polygon, angle_deg: float) -> Decomposition:
         for i, cell in enumerate(previous):
             if i not in kept:
                 closing = _gate_vertices(x, cell.section, [sections[j] for j in outgoing[i]])
-                polygon = to_world(cell.close_at(x, closing), angle_deg)
-                if not polygon.is_valid or not math.isfinite(polygon.area) or polygon.area <= 0:
-                    raise ValueError("Decomposition produced a numerically degenerate cell.")
-                cells.append(Cell(cell.id, polygon))
+                cells.append(_validated_cell(cell.id, cell.close_at(x, closing), angle_deg))
         events.append(_event(x, outgoing, incoming))
         previous = current
 
@@ -253,12 +251,19 @@ def _decompose(region: Polygon, angle_deg: float) -> Decomposition:
     events.append(_event(xs[-1], [[] for _ in previous], []))
     cells = []
     for cell_id, parts in sorted(pieces.items()):
-        merged = unary_union(parts)
-        if merged.geom_type != "Polygon" or merged.interiors:
-            raise ValueError("Numerically degenerate cell; rescale or clean the input map.")
-        cells.append(Cell(cell_id, to_world(merged, angle_deg)))
+        cells.append(_validated_cell(cell_id, unary_union(parts), angle_deg))
     _validate_partition(region, cells)
     return Decomposition(cells, dict(adjacency), events, angle_deg)
+
+
+def _validated_cell(cell_id: int, local: Polygon, angle_deg: float) -> Cell:
+    # Validate in the construction frame before projection roundoff can hide backtracking.
+    if not isinstance(local, Polygon) or not is_monotone(local, 90.0):
+        raise ValueError("Numerically degenerate decomposition: cell is invalid or nonmonotone.")
+    world = to_world(local, angle_deg)
+    if not is_monotone(world, angle_deg):
+        raise ValueError("Numerically degenerate decomposition: rotated cell is invalid or nonmonotone.")
+    return Cell(cell_id, world)
 
 
 def _validate_partition(region: Polygon, cells: list[Cell]) -> None:
@@ -266,6 +271,10 @@ def _validate_partition(region: Polygon, cells: list[Cell]) -> None:
         raise ValueError("Decomposition produced no cells.")
     union = unary_union([c.polygon for c in cells])
     error = union.symmetric_difference(region).area
-    overlap = sum(c.polygon.area for c in cells) - union.area
-    if error > max(region.area, 1) * 1e-7 or overlap > max(region.area, 1) * 1e-7:
-        raise ValueError("Decomposition failed area/overlap validation.")
+    overlap = math.fsum(c.polygon.area for c in cells) - union.area
+    # Divide by input area so the tolerance also applies to very small regions.
+    if (
+        not math.isfinite(error) or not math.isfinite(overlap)
+        or error / region.area > 1e-7 or overlap / region.area > 1e-7
+    ):
+        raise ValueError("Numerically degenerate decomposition: area/overlap validation failed.")
