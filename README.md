@@ -12,7 +12,7 @@ before interpreting a path as a physically executable robot or UAV trajectory.
 
 | Component | Implementation |
 |---|---|
-| Boustrophedon decomposition | Event slabs, one-to-one continuation, split/merge handling, adjacency graph |
+| Boustrophedon decomposition | Incremental floor/ceiling sweep, split/merge handling, adjacency graph |
 | Sweep patterns | Four start/order permutations per valid angle; initial left/right turn metadata |
 | TSP baseline | One fixed sweep state per cell, nearest-neighbor, directed-safe 2-opt |
 | GTSP heuristic | One state per cell, exact state-selection DP for a fixed order, 2-opt order search, seeded restarts |
@@ -180,7 +180,7 @@ solver. Planning time excludes output rendering and metric computation.
 ```text
 src/coverage_planning/
   geometry.py          Geometry validation, rotation, monotonicity
-  decomposition.py     Event-slab BCD and adjacency
+  decomposition.py     Incremental BCD and cell adjacency
   sweeps.py            Directed sweep candidates and turn-side filters
   transitions.py       Visibility graph and Dijkstra
   costs.py             Directed service/transition costs

@@ -32,6 +32,15 @@ def test_rectangular_hole_is_four_cells(one_obstacle):
     assert sum(len(n) for n in result.adjacency.values()) == 8
 
 
+def test_rotated_neighbors_share_positive_length_gates(one_obstacle):
+    result = decompose(one_obstacle, 17)
+    assert sum(len(neighbors) for neighbors in result.adjacency.values()) == 8
+    for cell in result.cells:
+        for neighbor_id in result.adjacency[cell.id]:
+            neighbor = result.cells[neighbor_id]
+            assert cell.polygon.boundary.intersection(neighbor.polygon.boundary).length > 0
+
+
 def test_middle_events_do_not_create_cells():
     # Lots of vertices, but all vertical sections remain connected.
     poly = Polygon([(0, 0), (4, 0), (8, 0), (8, 5), (6, 6), (4, 5), (2, 7), (0, 5)])

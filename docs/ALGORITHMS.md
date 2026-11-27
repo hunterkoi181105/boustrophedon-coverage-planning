@@ -14,20 +14,20 @@ when using a configuration-space interpretation.
 
 ## 2. Boustrophedon decomposition
 
-The foundational Choset-Pignon method retains a cell across boundary changes that
-do not change slice connectivity, and closes/opens cells at split/merge events.
-The repository implements this idea through **event slabs**, rather than reproducing
-the paper's floor/ceiling pointer data structures.
+The default `decompose()` follows the incremental floor-and-ceiling construction
+of Choset and Pignon. It rotates the polygon into the sweep frame and processes
+the sorted boundary events, handling vertices with the same X together. The
+active boundary edges define the ordered free-space intervals on each side of
+an event.
 
-1. Rotate P so the chosen slice direction is vertical.
-2. Sort and group vertex X coordinates.
-3. Intersect P with each consecutive event slab.
-4. Find which components in consecutive slabs share a positive-length gate.
-5. Continue a cell only across a mutual one-to-one correspondence.
-6. At splits, merges, births, or deaths, end/open the affected cells and add
-   adjacency edges.
-7. Union all fragments belonging to a cell and rotate back.
-8. Check area conservation and non-overlap.
+An interval continues the same cell when it has a mutual one-to-one match across
+a gate of positive length. At IN (split) and OUT (merge) events, the sweep closes
+the affected cells, opens new cells, and records their adjacency. Floor and ceiling
+changes extend the current cell's boundary chains. The sweep forms a polygon from
+those chains when the cell closes, then rotates it back and validates the partition.
+
+The original polygon-clipping implementation is available as `decompose_slabs()`
+for comparisons.
 
 IMPORTANT: compare the local component correspondence, not just the total number
 of slice components. A split and a merge can happen at the same X coordinate,
@@ -135,7 +135,8 @@ Let n be boundary vertices, m cells, and k the largest number of states per cell
 | Stage | Complexity/qualification |
 |---|---|
 | Event sorting | O(n log n) |
-| This decomposition | O(n) full polygon/slab intersections plus component joins; not an O(n log n) implementation |
+| Incremental BCD | O(n log n + sum of active edge counts across events), before geometry validation |
+| Slab BCD baseline | O(n) full polygon/slab intersections plus component joins and polygon unions |
 | Full visibility graph | O(n^2) visibility tests; naive each-test cost can depend on n |
 | Dijkstra | O(E log V) per uncached query, plus endpoint-visibility construction |
 | Greedy order | O(m^2) cached cost lookups |
