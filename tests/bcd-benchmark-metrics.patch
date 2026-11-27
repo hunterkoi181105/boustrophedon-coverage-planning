@@ -1,0 +1,626 @@
+diff --git a/docs/BENCHMARKS.md b/docs/BENCHMARKS.md
+new file mode 100644
+index 0000000..42455c4
+--- /dev/null
++++ b/docs/BENCHMARKS.md
+@@ -0,0 +1,122 @@
++# Topic 5 experiment set: reproducible per-sample metrics
++
++This is a benchmark *harness*, not published performance results. No statistics
++are claimed until the commands are run on the experiment machine.
++
++## 1. Prepare two collections of polygons with holes
++
++Generate 10 fixed-seed synthetic maps. The generator creates rectangles with
++0 to 5 disjoint rectangular holes and records each map's generation seed.
++
++```powershell
++python -m coverage_planning.datasets synthetic --out benchmarks/synthetic --count 10 --seed 2026 --swath 3
++```
++
++To select 15 ETH-derived AC300 maps (3 each with 1, 3, 5, 10 and 15 holes), first
++obtain UNC Charlotte's AreaCoverage-dataset repository separately. Then run:
++
++```powershell
++python -m coverage_planning.datasets ac300 --source ..\AreaCoverage-dataset --out benchmarks/ac300 --holes 1 3 5 10 15 --per-hole 3 --swath 3
++```
++
++Source: https://github.com/UNCCharlotte-CS-Robotics/AreaCoverage-dataset
++and https://github.com/ethz-asl/polygon_coverage_planning . The original ETH
++benchmark cost is time-based; do not compare it numerically with our distance
++objective. AC300 is ETH-derived, not an independent third collection.
++
++AC300 coordinates are planar metres. The converted depot is (1,1) when in free
++space; otherwise it is a representative interior point. This depot is *our*
++benchmark convention, not an original dataset start location.
++
++## 2. Run every algorithm on every sample
++
++For an initial smoke run with one seed:
++
++```powershell
++coverage-benchmark --maps benchmarks/synthetic --algorithms tsp-greedy tsp-2opt gtsp --seeds 0 --out results/synthetic_smoke.csv
++```
++
++For the final experiment, use 1 seed for the deterministic baselines and 30
++seeds for randomized GTSP. Use identical swath, start, closed/open setting,
++and decomposition/sweep angles for each algorithm:
++
++```powershell
++coverage-benchmark --maps benchmarks/synthetic --algorithms tsp-greedy tsp-2opt --seeds 0 --swath 3 --out results/synthetic_baselines.csv
++coverage-benchmark --maps benchmarks/synthetic --algorithms gtsp --seed-count 30 --swath 3 --out results/synthetic_gtsp.csv
++coverage-benchmark --maps benchmarks/ac300 --algorithms tsp-greedy tsp-2opt --seeds 0 --swath 3 --out results/ac300_baselines.csv
++coverage-benchmark --maps benchmarks/ac300 --algorithms gtsp --seed-count 30 --swath 3 --out results/ac300_gtsp.csv
++```
++
++The CSV naming is illustrative: `--out X.csv` always produces `X_summary.csv`
++and a matching `X_runs/` folder. GTSP uses different fixed random seeds;
++it may nevertheless return identical routes for many seeds.
++
++For small maps (up to 8 cells), run the discretized GTSP exact oracle and
++compute `100 * (GTSP_heuristic - GTSP_exact) / GTSP_exact` with both objectives
++under the same settings:
++
++```powershell
++coverage-benchmark --maps examples --algorithms gtsp gtsp-exact --seeds 0 --out results/small_exact.csv
++```
++
++Exclude any map exceeding the exact solver's 8-cell guard; failures are
++recorded in the CSV rather than silently ignored.
++
++For sweep-angle ablation:
++
++```powershell
++coverage-benchmark --maps benchmarks/synthetic --seed-count 30 --angles 90 --out results/vertical_only.csv
++coverage-benchmark --maps benchmarks/synthetic --seed-count 30 --angles 90 0 --out results/mixed_angles.csv
++```
++
++The output is **not** automatically a controlled test unless all *other*
++parameters are identical. Default decomposition orientation is 90 degrees.
++
++## 3. Files written for each sample and run
++
++`results/synthetic.csv`: one row per map, algorithm and seed, including:
++
++- success/failure, error message, map source, holes, vertices and free area;
++- total, service and transit length, coverage %, overlap excess %;
++- vertex turns, lane reversals, total absolute turn angle;
++- preprocessing, solver and planning time, cells and candidate states;
++- optional constant-speed estimated mission duration (`--robot-speed 1.5`);
++- selected cell order, selected sweep angles and first-turn decisions;
++- experiment configuration (spacing, swath, seed, turn penalty, etc.).
++
++`results/synthetic_summary.csv`: per-map/per-algorithm success rate,
++median coverage, path length, overlap, turns, runtime, plus path length and
++runtime IQR. Quartiles use linear interpolation at rank `(n-1)*p`.
++
++`results/synthetic_runs/<map>/<algorithm>/seed_<n>/metrics.json` and
++`plan.json`: full original metric object and selected trajectory/state details.
++`geometry.geojson` is also included. Add `--plot-runs` to save a PNG for each
++run, but do not enable this for large timing experiments without reason.
++
++Errors are recorded instead of being discarded. CSV rows and the summary are
++flushed continuously so interrupted experiments leave partial evidence. Pass
++`--strict` in CI to return an error code if any map fails; otherwise inspect the
++per-run `status` column and success rate.
++
++## 4. Metric definitions and reporting cautions
++
++Coverage = clipped service-footprint union / free-space area.
++Overlap excess = sum of clipped segment footprint areas minus their union,
++divided by free-space area. It is **not** the fraction of area covered twice.
++Turns count polyline heading changes exceeding 1 degree, including transitions;
++lane reversals are `sum(lanes - 1)` and exclude transit.
++
++The planning timing fields exclude rendering and metric computation; they are
++not robot mission times. `--robot-speed V` estimates mission time as total
++route length / V, assuming constant speed with zero time penalty for turning;
++this is a labeled approximation, **not** a physically modeled mission time.
++The project has no energy model. State energy as a modeling limitation unless
++an explicit energy/turning model is separately implemented.
++
++Use separate maps for hyperparameter tuning and final evaluation. For a report,
++add log-log runtime scaling, profiling, parameter sensitivity, an ablation,
++small-instance optimality-gap checks with `gtsp-exact` (<=8 cells), and
++appropriate statistical comparisons. Record the CPU, OS, Python/Shapely
++versions, and peak memory using separate profiling tools.
++
++Avoid copying ETH/UNC algorithm source; cite the upstream dataset and paper.
+diff --git a/src/coverage_planning/benchmark.py b/src/coverage_planning/benchmark.py
+index a22a0db..aeb5559 100644
+--- a/src/coverage_planning/benchmark.py
++++ b/src/coverage_planning/benchmark.py
+@@ -1,40 +1,208 @@
++"""Run reproducible per-instance benchmarks and retain every run's metrics."""
+ from __future__ import annotations
+ 
+ import argparse
+ import csv
++import json
++import math
++import statistics
++import sys
++from collections import defaultdict
+ from pathlib import Path
+ 
+-from .pipeline import Config, plan
++from .geometry import load_map
++from .pipeline import Config, plan, save_run
++
++ALGORITHMS = ("tsp-greedy", "tsp-2opt", "gtsp", "gtsp-exact")
++METRIC_COLUMNS = (
++    "objective", "total_length", "service_length", "transit_length",
++    "coverage_ratio", "uncovered_area", "overlap_excess_ratio",
++    "vertex_turn_count", "lane_reversal_count", "absolute_turn_angle_rad",
++    "preprocessing_seconds", "solver_seconds", "planning_seconds",
++    "collision_free_within_tolerance", "num_cells", "num_candidate_states",
++)
++COLUMNS = (
++    "map", "source_file", "algorithm", "seed", "status", "error", "run_directory",
++    "holes", "vertices", "free_area", "swath", "spacing", "decomposition_angle_deg",
++    "candidate_angles_deg", "turn_weight", "robot_speed_m_per_s", "restarts", "closed", "boundary_pass",
++    *METRIC_COLUMNS, "coverage_percent", "overlap_excess_percent",
++    "estimated_mission_seconds",
++    "selected_cell_order", "selected_sweep_angles_deg", "selected_first_turns",
++)
++SUMMARY_COLUMNS = (
++    "map", "algorithm", "runs", "successful_runs", "success_rate",
++    "total_length_median", "total_length_iqr", "coverage_percent_median",
++    "transit_length_median", "vertex_turn_count_median", "lane_reversal_count_median",
++    "overlap_excess_percent_median", "planning_seconds_median", "planning_seconds_iqr",
++    "estimated_mission_seconds_median",
++)
++
++
++def _quartile(values: list[float], proportion: float) -> float:
++    """Linear interpolation at (n - 1) * proportion for reproducible IQR."""
++    ordered = sorted(values)
++    pos = (len(ordered) - 1) * proportion
++    lo, hi = int(pos), min(int(pos) + 1, len(ordered) - 1)
++    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
++
++
++def _stat(rows: list[dict], field: str, *, iqr: bool = False) -> float | str:
++    values = [float(row[field]) for row in rows if row.get(field) not in (None, "")]
++    if not values:
++        return ""
++    if iqr:
++        return _quartile(values, 0.75) - _quartile(values, 0.25)
++    return statistics.median(values)
++
++
++def _write_summary(rows: list[dict], path: Path) -> None:
++    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
++    for row in rows:
++        groups[(row["map"], row["algorithm"])].append(row)
++    with path.open("w", newline="", encoding="utf-8") as handle:
++        writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS)
++        writer.writeheader()
++        for (name, algorithm), group in sorted(groups.items()):
++            passed = [row for row in group if row["status"] == "ok"]
++            writer.writerow({
++                "map": name, "algorithm": algorithm, "runs": len(group),
++                "successful_runs": len(passed), "success_rate": len(passed) / len(group),
++                "total_length_median": _stat(passed, "total_length"),
++                "total_length_iqr": _stat(passed, "total_length", iqr=True),
++                "coverage_percent_median": _stat(passed, "coverage_percent"),
++                "transit_length_median": _stat(passed, "transit_length"),
++                "vertex_turn_count_median": _stat(passed, "vertex_turn_count"),
++                "lane_reversal_count_median": _stat(passed, "lane_reversal_count"),
++                "overlap_excess_percent_median": _stat(passed, "overlap_excess_percent"),
++                "planning_seconds_median": _stat(passed, "planning_seconds"),
++                "planning_seconds_iqr": _stat(passed, "planning_seconds", iqr=True),
++                "estimated_mission_seconds_median": _stat(passed, "estimated_mission_seconds"),
++            })
+ 
+ 
+ def main(argv=None) -> int:
+-    parser = argparse.ArgumentParser(description="Reproducible planner comparison on JSON maps")
+-    parser.add_argument("--maps", default="examples")
+-    parser.add_argument("--algorithms", nargs="+", default=["tsp-greedy", "tsp-2opt", "gtsp"])
+-    parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
++    parser = argparse.ArgumentParser(description="Per-run metrics for BCD + TSP/GTSP benchmarks")
++    parser.add_argument("--maps", default="examples", help="Directory of JSON maps (searched recursively)")
++    parser.add_argument("--algorithms", nargs="+", choices=ALGORITHMS,
++                        default=["tsp-greedy", "tsp-2opt", "gtsp"])
++    seed_choice = parser.add_mutually_exclusive_group()
++    seed_choice.add_argument("--seeds", nargs="+", type=int, help="Explicit fixed seed values")
++    seed_choice.add_argument("--seed-count", type=int, help="Use seeds 0..N-1 (30 for randomized GTSP)")
++    parser.add_argument("--decomposition-angle", type=float, default=90.0)
++    parser.add_argument("--angles", nargs="+", type=float, default=None)
++    parser.add_argument("--swath", type=float, default=None)
++    parser.add_argument("--spacing", type=float, default=None)
++    parser.add_argument("--turn-weight", type=float, default=0.0)
++    parser.add_argument("--robot-speed", type=float, default=None,
++                        help="Optional constant speed (m/s) for estimated mission duration")
++    parser.add_argument("--restarts", type=int, default=2)
++    parser.add_argument("--start", nargs=2, type=float, default=None)
++    parser.add_argument("--open", action="store_true")
+     parser.add_argument("--boundary-pass", action="store_true")
+     parser.add_argument("--out", default="results/benchmark.csv")
++    parser.add_argument("--runs-dir", help="Where per-run plan.json and metrics.json are written")
++    parser.add_argument("--no-save-runs", action="store_true", help="Only write CSV files")
++    parser.add_argument("--plot-runs", action="store_true", help="Also save per-run trajectory.png")
++    parser.add_argument("--strict", action="store_true", help="Exit nonzero if any run fails")
+     args = parser.parse_args(argv)
+-    paths = sorted(Path(args.maps).glob("*.json"))
++    if args.seed_count is not None and args.seed_count < 1:
++        parser.error("--seed-count must be positive")
++    if args.restarts < 0:
++        parser.error("--restarts must be nonnegative")
++    if args.robot_speed is not None and (
++        not math.isfinite(args.robot_speed) or args.robot_speed <= 0
++    ):
++        parser.error("--robot-speed must be a finite positive number")
++    if not math.isfinite(args.decomposition_angle):
++        parser.error("--decomposition-angle must be finite")
++    if args.plot_runs and args.no_save_runs:
++        parser.error("--plot-runs is incompatible with --no-save-runs")
++    seeds = args.seeds if args.seeds is not None else list(range(args.seed_count or 3))
++    maps_dir = Path(args.maps)
++    paths = sorted(maps_dir.rglob("*.json"))
+     if not paths:
+-        parser.exit(2, "No JSON maps found.\n")
+-    rows = []
+-    for path in paths:
+-        for algorithm in args.algorithms:
+-            for seed in args.seeds:
+-                # Fresh model/router each run: no cross-solver warm-cache advantage.
+-                run = plan(path, Config(algorithm=algorithm, seed=seed, boundary_pass=args.boundary_pass))
+-                m = run.metrics
+-                row = {"map": path.stem, **{k: v for k, v in m.items() if not isinstance(v, (list, tuple))}}
+-                rows.append(row)
+-                print(f"{path.stem:24} {algorithm:12} seed={seed} length={m['total_length']:.3f} coverage={m['coverage_ratio']:.3%}")
++        parser.error(f"No JSON maps found in {maps_dir}")
++
+     output = Path(args.out)
+     output.parent.mkdir(parents=True, exist_ok=True)
+-    with output.open("w", newline="", encoding="utf-8") as f:
+-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
++    summary = output.with_name(output.stem + "_summary.csv")
++    runs_dir = Path(args.runs_dir) if args.runs_dir else output.with_name(output.stem + "_runs")
++    rows: list[dict] = []
++    failures = 0
++    with output.open("w", newline="", encoding="utf-8") as handle:
++        writer = csv.DictWriter(handle, fieldnames=COLUMNS)
+         writer.writeheader()
+-        writer.writerows(rows)
+-    return 0
++        for path in paths:
++            name = path.relative_to(maps_dir).with_suffix("").as_posix()
++            for algorithm in args.algorithms:
++                for seed in seeds:
++                    directory = runs_dir / name / algorithm / f"seed_{seed}"
++                    row: dict = {
++                        "map": name, "source_file": str(path), "algorithm": algorithm,
++                        "seed": seed, "status": "ok", "error": "", "run_directory": "",
++                        "decomposition_angle_deg": args.decomposition_angle,
++                        "candidate_angles_deg": json.dumps(args.angles if args.angles is not None
++                                                           else [args.decomposition_angle, 0.0]),
++                        "turn_weight": args.turn_weight, "robot_speed_m_per_s": args.robot_speed,
++                        "restarts": args.restarts,
++                        "closed": not args.open, "boundary_pass": args.boundary_pass,
++                    }
++                    try:
++                        region, data = load_map(path)
++                        row.update({
++                            "holes": len(region.interiors),
++                            "vertices": len(region.exterior.coords) - 1 + sum(
++                                len(ring.coords) - 1 for ring in region.interiors
++                            ),
++                            "free_area": region.area,
++                        })
++                        config = Config(
++                            algorithm=algorithm, seed=seed, boundary_pass=args.boundary_pass,
++                            decomposition_angle=args.decomposition_angle,
++                            angles=tuple(args.angles) if args.angles is not None else None,
++                            swath=args.swath, spacing=args.spacing, turn_weight=args.turn_weight,
++                            restarts=args.restarts, closed=not args.open,
++                            start=tuple(args.start) if args.start is not None else None,
++                        )
++                        # Fresh planner, costs, and router per trial: no cross-trial cache.
++                        run = plan(path, config)
++                        metrics = run.metrics
++                        row.update({k: metrics.get(k, "") for k in METRIC_COLUMNS})
++                        row.update({
++                            "swath": metrics["swath"], "spacing": metrics["spacing"],
++                            "coverage_percent": metrics["coverage_ratio"] * 100,
++                            "estimated_mission_seconds": (
++                                metrics["total_length"] / args.robot_speed
++                                if args.robot_speed is not None else ""
++                            ),
++                            "overlap_excess_percent": metrics["overlap_excess_ratio"] * 100,
++                            "selected_cell_order": json.dumps(metrics["selected_cell_order"]),
++                            "selected_first_turns": json.dumps(metrics["selected_first_turns"]),
++                            "selected_sweep_angles_deg": json.dumps(
++                                [s.angle_deg for s in run.solution.states]
++                            ),
++                        })
++                        if not args.no_save_runs:
++                            save_run(run, directory, make_plot=args.plot_runs)
++                            row["run_directory"] = str(directory)
++                        print(f"OK   {name:24} {algorithm:12} seed={seed:<3} "
++                              f"length={metrics['total_length']:.3f} "
++                              f"coverage={metrics['coverage_ratio']:.1%} "
++                              f"turns={metrics['vertex_turn_count']} "
++                              f"time={metrics['planning_seconds']:.3f}s", flush=True)
++                    except (ValueError, OSError, KeyError, TypeError, RuntimeError) as exc:
++                        failures += 1
++                        row["status"] = "failed"
++                        row["error"] = f"{type(exc).__name__}: {exc}"
++                        print(f"FAIL {name:24} {algorithm:12} seed={seed:<3} {row['error']}",
++                              file=sys.stderr, flush=True)
++                    writer.writerow(row)
++                    handle.flush()  # Partial results survive interrupted benchmark jobs.
++                    rows.append(row)
++                    _write_summary(rows, summary)
++    print(f"Per-run metrics: {output}\nPer-map summaries: {summary}")
++    print(f"Completed {len(rows) - failures}/{len(rows)} runs successfully.")
++    return 1 if failures and args.strict else 0
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/src/coverage_planning/datasets.py b/src/coverage_planning/datasets.py
+new file mode 100644
+index 0000000..861bdba
+--- /dev/null
++++ b/src/coverage_planning/datasets.py
+@@ -0,0 +1,148 @@
++"""Prepare reproducible synthetic and AC300 polygon-with-holes benchmarks.
++
++Use `python -m coverage_planning.datasets --help` for the two subcommands.
++No network access is required; AC300 is read from a separately downloaded repository.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import random
++import re
++from pathlib import Path
++
++from shapely.geometry import Point, Polygon, box
++
++
++def _write_map(path: Path, data: dict) -> None:
++    polygon = Polygon(data["boundary"], data["holes"])
++    if not polygon.is_valid or polygon.is_empty or polygon.area <= 0:
++        raise ValueError(f"Invalid generated polygon: {path}")
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
++
++
++def synthetic(out: Path, count: int, seed: int, swath: float) -> int:
++    """Generate rectangular maps with 0..5 disjoint rectangular holes."""
++    if count < 1 or swath <= 0:
++        raise ValueError("count and swath must be positive")
++    for index in range(count):
++        rng = random.Random(seed + index)
++        w = float(rng.randint(85, 115))
++        h = float(rng.randint(85, 115))
++        n_holes = index % 6
++        holes = []
++        occupied = []
++        for _ in range(n_holes):
++            for _attempt in range(1000):
++                rw = rng.uniform(5, 13)
++                rh = rng.uniform(5, 13)
++                x = rng.uniform(12, w - 12 - rw)
++                y = rng.uniform(12, h - 12 - rh)
++                proposal = box(x, y, x + rw, y + rh)
++                if all(not proposal.buffer(3).intersects(prev) for prev in occupied):
++                    occupied.append(proposal)
++                    holes.append([[round(a, 5), round(b, 5)]
++                                  for a, b in list(proposal.exterior.coords)[:-1]])
++                    break
++            else:
++                raise ValueError("Could not generate disjoint holes")
++        data = {
++            "name": f"synthetic_{index:03d}", "units": "metres",
++            "boundary": [[0, 0], [w, 0], [w, h], [0, h]],
++            "holes": holes, "start": [1, 1], "swath": swath,
++            "generation_seed": seed + index,
++        }
++        _write_map(out / f"synthetic_{index:03d}.json", data)
++    return count
++
++
++def _points(text: str) -> list[list[float]]:
++    points = []
++    for line in text.splitlines():
++        tokens = line.split()
++        if len(tokens) != 2:
++            raise ValueError("Expected exactly two numeric columns in coordinate file")
++        points.append([float(tokens[0]), float(tokens[1])])
++    return points
++
++
++def _read_rings(path: Path) -> list[list[list[float]]]:
++    if not path.exists():
++        return []
++    rings = []
++    for block in re.split(r"\n\s*\n", path.read_text(encoding="utf-8").strip()):
++        if block:
++            ring = _points(block)
++            if len(ring) < 3:
++                raise ValueError(f"Invalid ring in {path}")
++            rings.append(ring)
++    return rings
++
++
++def ac300(source: Path, out: Path, per_hole: int, hole_counts: list[int], swath: float) -> int:
++    """Import matching UNC Charlotte AC300 maps, using one consistent depot."""
++    if per_hole < 1 or swath <= 0:
++        raise ValueError("per-hole and swath must be positive")
++    root = source / "AC300" if (source / "AC300").is_dir() else source
++    total = 0
++    for holes in hole_counts:
++        candidates = sorted(root.glob(f"AC{holes}_*"))
++        if len(candidates) < per_hole:
++            raise ValueError(f"Need {per_hole} AC{holes} environments, found {len(candidates)}")
++        for directory in candidates[:per_hole]:
++            outer_rings = _read_rings(directory / "outer_polygon")
++            if len(outer_rings) != 1:
++                raise ValueError(f"Expected one outer ring at {directory}")
++            inner_rings = _read_rings(directory / "holes")
++            if len(inner_rings) != holes:
++                raise ValueError(
++                    f"Expected {holes} holes, found {len(inner_rings)} in {directory}"
++                )
++            region = Polygon(outer_rings[0], inner_rings)
++            if not region.is_valid or region.area <= 0:
++                raise ValueError(f"Invalid AC300 geometry: {directory}")
++            # A common, unobstructed depot; not a source-provided reference depot.
++            depot = (1.0, 1.0)
++            if not region.covers(Point(depot)):
++                depot = tuple(region.representative_point().coords[0])
++            data = {
++                "name": directory.name, "units": "metres",
++                "boundary": outer_rings[0], "holes": inner_rings,
++                "start": list(depot), "swath": swath,
++                "dataset": "UNCCharlotte-CS-Robotics/AreaCoverage-dataset AC300",
++            }
++            _write_map(out / f"{directory.name}.json", data)
++            total += 1
++    return total
++
++
++def main(argv=None) -> int:
++    parser = argparse.ArgumentParser(description="Build reproducible PWH benchmark maps")
++    commands = parser.add_subparsers(dest="mode", required=True)
++    gen = commands.add_parser("synthetic", help="Generate fixed-seed maps with 0..5 holes")
++    gen.add_argument("--out", default="benchmarks/synthetic")
++    gen.add_argument("--count", type=int, default=10)
++    gen.add_argument("--seed", type=int, default=2026)
++    gen.add_argument("--swath", type=float, default=3.0)
++    imp = commands.add_parser("ac300", help="Convert AC300 folders from a local dataset clone")
++    imp.add_argument("--source", required=True, help="Path to AreaCoverage-dataset or AC300 folder")
++    imp.add_argument("--out", default="benchmarks/ac300")
++    imp.add_argument("--per-hole", type=int, default=3)
++    imp.add_argument("--holes", nargs="+", type=int, default=[1, 3, 5, 10, 15])
++    imp.add_argument("--swath", type=float, default=3.0)
++    args = parser.parse_args(argv)
++    try:
++        if args.mode == "synthetic":
++            total = synthetic(Path(args.out), args.count, args.seed, args.swath)
++        else:
++            total = ac300(Path(args.source), Path(args.out), args.per_hole,
++                          args.holes, args.swath)
++    except (ValueError, OSError) as exc:
++        parser.exit(2, f"Dataset preparation failed: {exc}\n")
++    print(f"Prepared {total} maps in {args.out}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/test_benchmark.py b/tests/test_benchmark.py
+new file mode 100644
+index 0000000..7366a43
+--- /dev/null
++++ b/tests/test_benchmark.py
+@@ -0,0 +1,104 @@
++import csv
++import json
++from pathlib import Path
++
++import pytest
++from shapely.geometry import Polygon
++
++from coverage_planning.benchmark import main as benchmark_main
++from coverage_planning.datasets import ac300, main as datasets_main, synthetic
++
++from .conftest import ROOT
++
++
++def test_benchmark_each_run_has_metrics_and_files(tmp_path):
++    folder = tmp_path / "maps"
++    folder.mkdir()
++    (folder / "rectangle.json").write_text(
++        (ROOT / "examples/rectangle.json").read_text(encoding="utf-8"), encoding="utf-8"
++    )
++    output = tmp_path / "metrics.csv"
++    assert benchmark_main([
++        "--maps", str(folder), "--algorithms", "tsp-greedy", "gtsp",
++        "--seeds", "0", "1", "--robot-speed", "2", "--out", str(output),
++    ]) == 0
++    with output.open(newline="", encoding="utf-8") as f:
++        rows = list(csv.DictReader(f))
++    assert len(rows) == 4
++    assert all(row["status"] == "ok" for row in rows)
++    assert all(float(row["coverage_ratio"]) == pytest.approx(1.0) for row in rows)
++    assert all("total_length" in row for row in rows)
++    assert all(float(row["total_length"]) == pytest.approx(
++        float(row["service_length"]) + float(row["transit_length"])
++    ) for row in rows)
++    assert all(float(row["planning_seconds"]) >= 0 for row in rows)
++    assert all(float(row["estimated_mission_seconds"]) == pytest.approx(
++        float(row["total_length"]) / 2
++    ) for row in rows)
++    assert all(json.loads(row["selected_sweep_angles_deg"]) for row in rows)
++    assert all(Path(row["run_directory"], "metrics.json").is_file() for row in rows)
++    with output.with_name("metrics_summary.csv").open(newline="", encoding="utf-8") as f:
++        summary = list(csv.DictReader(f))
++    assert len(summary) == 2
++    assert all(int(row["runs"]) == 2 for row in summary)
++    assert all(float(row["success_rate"]) == 1 for row in summary)
++
++
++def test_benchmark_preserves_failures_and_nested_names(tmp_path):
++    maps = tmp_path / "maps"
++    (maps / "nested").mkdir(parents=True)
++    (maps / "nested" / "invalid.json").write_text("not JSON", encoding="utf-8")
++    (maps / "nested" / "rectangle.json").write_text(
++        (ROOT / "examples/rectangle.json").read_text(encoding="utf-8"), encoding="utf-8"
++    )
++    out = tmp_path / "runs.csv"
++    assert benchmark_main([
++        "--maps", str(maps), "--algorithms", "tsp-2opt", "--seeds", "7",
++        "--no-save-runs", "--out", str(out),
++    ]) == 0
++    with out.open(newline="", encoding="utf-8") as f:
++        rows = list(csv.DictReader(f))
++    assert len(rows) == 2
++    assert rows[0]["map"] == "nested/invalid"
++    assert rows[0]["status"] == "failed"
++    assert "JSONDecodeError" in rows[0]["error"]
++    assert rows[1]["map"] == "nested/rectangle"
++    assert rows[1]["status"] == "ok"
++    assert benchmark_main([
++        "--maps", str(maps), "--algorithms", "tsp-2opt", "--seeds", "7",
++        "--strict", "--no-save-runs", "--out", str(out),
++    ]) == 1
++
++
++def test_fixed_seed_synthetic_geometry(tmp_path):
++    left = tmp_path / "a"
++    right = tmp_path / "b"
++    assert synthetic(left, count=7, seed=2026, swath=3.0) == 7
++    assert synthetic(right, count=7, seed=2026, swath=3.0) == 7
++    for i in range(7):
++        name = f"synthetic_{i:03d}.json"
++        assert (left / name).read_bytes() == (right / name).read_bytes()
++        data = json.loads((left / name).read_text(encoding="utf-8"))
++        assert len(data["holes"]) == i % 6
++        assert Polygon(data["boundary"], data["holes"]).is_valid
++
++
++def test_ac300_converter_parses_blank_line_separated_holes(tmp_path):
++    source = tmp_path / "source" / "AC300" / "AC1_0000"
++    source.mkdir(parents=True)
++    (source / "outer_polygon").write_text("0 0\n100 0\n100 100\n0 100\n")
++    (source / "holes").write_text("30 30\n40 30\n40 40\n30 40\n")
++    destination = tmp_path / "converted"
++    assert ac300(source.parent, destination, 1, [1], 3.0) == 1
++    result = json.loads((destination / "AC1_0000.json").read_text(encoding="utf-8"))
++    assert result["swath"] == 3.0
++    assert result["start"] == [1.0, 1.0]
++    assert len(result["holes"]) == 1
++    assert Polygon(result["boundary"], result["holes"]).area == pytest.approx(9900)
++
++
++def test_datasets_cli_synthetic(tmp_path):
++    assert datasets_main([
++        "synthetic", "--count", "2", "--seed", "19", "--out", str(tmp_path),
++    ]) == 0
++    assert len(list(tmp_path.glob("*.json"))) == 2

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import math
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from heapq import merge
 
+from shapely.errors import GEOSException
 from shapely.errors import GEOSException
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
@@ -185,9 +187,24 @@ def decompose_slabs(region: Polygon, angle_deg: float = 90.0) -> Decomposition:
     """Decompose by polygon clipping for comparisons against the default sweep."""
     if region.is_empty or not region.is_valid or region.area <= 0:
         raise ValueError("Expected one valid, connected, positive-area Polygon.")
+    if not math.isfinite(angle_deg):
+        raise ValueError("Decomposition angle must be finite.")
+    try:
+        return _decompose(region, angle_deg)
+    except GEOSException as exc:
+        raise ValueError(
+            "Numerically degenerate decomposition: geometry operation failed; "
+            "rescale or clean the input map."
+        ) from exc
+
+
+def _decompose(region: Polygon, angle_deg: float) -> Decomposition:
     local = to_local(region, angle_deg)
-    eps = tolerance(local)
+    if local.is_empty or not local.is_valid or not math.isfinite(local.area) or local.area <= 0:
+        raise ValueError("Numerically degenerate decomposition: rotation lost valid geometry.")
     xs = event_coordinates(local)
+    if len(xs) < 2:
+        raise ValueError("Numerically degenerate decomposition: no positive-width event strips.")
     _, ymin, _, ymax = local.bounds
     pad = max(ymax - ymin, 1)
     pieces: dict[int, list[Polygon]] = defaultdict(list)
@@ -198,16 +215,17 @@ def decompose_slabs(region: Polygon, angle_deg: float = 90.0) -> Decomposition:
     next_id = 0
 
     for left, right in zip(xs, xs[1:]):
-        if right - left <= eps:
-            continue
+        if not left < right:
+            raise ValueError("Numerically degenerate decomposition: unordered event coordinates.")
         clipped = local.intersection(box(left, ymin - pad, right, ymax + pad))
-        current = sorted(
-            [p for p in polygon_parts(clipped) if p.area > eps * eps],
-            key=lambda p: p.centroid.y,
-        )
+        current = sorted(polygon_parts(clipped), key=lambda p: p.centroid.y)
+        if not current or any(
+            not p.is_valid or not math.isfinite(p.area) or p.area <= 0 for p in current
+        ):
+            raise ValueError("Numerically degenerate decomposition: event strip lost positive area.")
         # Positive-length shared gates, not just touching at a point.
         links = [
-            [j for j, q in enumerate(current) if p.intersection(q).length > eps]
+            [j for j, q in enumerate(current) if p.intersection(q).length > 0]
             for p in previous
         ]
         incoming = [

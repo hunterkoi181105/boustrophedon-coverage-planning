@@ -1,0 +1,29 @@
+{
+  "name": "synthetic_006",
+  "units": "metres",
+  "boundary": [
+    [
+      0,
+      0
+    ],
+    [
+      111.0,
+      0
+    ],
+    [
+      111.0,
+      86.0
+    ],
+    [
+      0,
+      86.0
+    ]
+  ],
+  "holes": [],
+  "start": [
+    1,
+    1
+  ],
+  "swath": 3.0,
+  "generation_seed": 2032
+}
